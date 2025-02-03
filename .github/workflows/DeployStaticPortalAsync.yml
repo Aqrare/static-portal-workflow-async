@@ -1,0 +1,143 @@
+name: Generate and Deploy Static Portal
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  portal-deployment:
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Zip current directory
+      run: |
+        zip -r build-input.zip . -x .git/\* -x .github/\* -x build-input.zip
+
+    - name: Call docs as code async endpoint
+      id: upload
+      run: |
+        RESPONSE=`curl --silent --write-out '%{http_code}\t%{content_type}' --output response1.json --location 'https://api.apimatic.io/portal/v2' \
+            --header 'Authorization:X-Auth-Key ${{ secrets.API_KEY }}' --form 'file=@build-input.zip'`
+
+        HTTP_CODE=$(echo $RESPONSE | cut -d " " -f 1);
+        CONTENT_TYPE=$(echo $RESPONSE | cut -d " " -f 2);
+        echo "HTTP_CODE=$HTTP_CODE" >> $GITHUB_OUTPUT;
+        echo "CONTENT_TYPE=$CONTENT_TYPE" >> $GITHUB_OUTPUT;
+
+        echo "Full response:"
+        cat response1.json
+
+        if [[ "$HTTP_CODE" == "202" ]]; then
+            status_url=$(jq -r '.links.status' response1.json)
+            echo "status_url=$status_url" >> $GITHUB_OUTPUT
+        else
+          echo "Failed to upload build input. HTTP_CODE=$HTTP_CODE"
+          exit 1
+        fi
+
+    - name: Poll the status endpoint for build completion
+      id: generate-portal
+      run: |
+        status_url=${{ steps.upload.outputs.status_url }}
+        while true; do
+          echo "Polling status URL: $status_url"
+    
+          response=$(curl --silent --write-out '%{http_code}\t%{content_type}' --output response.json --header 'Authorization: X-Auth-Key ${{ secrets.API_KEY }}' "$status_url")
+    
+          echo "Pre redirect response: $response"
+    
+          HTTP_CODE=$(echo "$response" | cut -f1 -d $'\t')
+          CONTENT_TYPE=$(echo "$response" | cut -f2 -d $'\t')
+          
+          if [[ "$HTTP_CODE" == "302" ]]; then
+            echo "Redirect received. Following the redirect to download the file..."
+            RESPONSE=$(curl -L --silent --write-out '%{http_code}\t%{content_type}' --header 'Authorization: X-Auth-Key ${{ secrets.API_KEY }}' "$status_url" -OJ)
+    
+            echo "Post redirect response: $RESPONSE"
+
+            POLL_HTTP_CODE=$(echo "$RESPONSE" | cut -f1 -d $'\t')
+            POLL_CONTENT_TYPE=$(echo "$RESPONSE" | cut -f2 -d $'\t')
+            
+            echo "HTTP_CODE=$POLL_HTTP_CODE" >> $GITHUB_OUTPUT
+            echo "CONTENT_TYPE=$POLL_CONTENT_TYPE" >> $GITHUB_OUTPUT
+            
+            break
+          fi
+    
+          if [[ "$HTTP_CODE" == "200" ]]; then
+            status=$(jq -r '.status' response.json)
+            echo "Status: $status"
+    
+            if [[ "$status" == "InProgress" ]]; then
+              echo "Build still in progress. Retrying in 10 seconds..."
+              sleep 10
+            else
+              echo "Unexpected status: $status"
+              exit 1
+            fi
+          else
+            echo "Unexpected response: $response. Exiting."
+            exit 1
+          fi
+        done
+
+    - name: list
+      run: ls
+
+    - name: Extract generated Portal
+      if: ${{steps.generate-portal.outputs.HTTP_CODE == '200'}}
+      run: unzip -qq portal.zip -d static-portal
+    
+    - name: list
+      run: ls
+
+    - name: Deploy to Netlify
+      if: ${{steps.generate-portal.outputs.HTTP_CODE == '200'}}
+      uses: nwtgck/actions-netlify@v2.0
+      with:
+        publish-dir: './static-portal'
+        production-branch: main
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        deploy-message: "Deploy from GitHub Actions"
+        enable-pull-request-comment: false
+        enable-commit-comment: true
+        overwrites-pull-request-comment: true
+      env:
+        NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+        NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+      timeout-minutes: 2
+
+    - name: Upload artifact
+      if: ${{steps.generate-portal.outputs.HTTP_CODE == '200' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: static-portal
+        path: static-portal
+
+    - name: Unzip error file
+      if: ${{steps.generate-portal.outputs.HTTP_CODE == '422' && steps.generate-portal.outputs.CONTENT_TYPE == 'application/zip'}}
+      run: unzip -qq error.zip -d error
+      
+    - name: Upload error.zip
+      if: ${{steps.generate-portal.outputs.HTTP_CODE == '422' && steps.generate-portal.outputs.CONTENT_TYPE == 'application/zip'}}
+      uses: actions/upload-artifact@v4
+      with:
+        name: error
+        path: error
+
+    - name: Log error if not successful
+      if: ${{steps.generate-portal.outputs.HTTP_CODE != '200' && steps.generate-portal.outputs.CONTENT_TYPE != 'application/zip'}}
+      run: |
+        echo "The Portal Generation request failed with response code ${{steps.generate-portal.outputs.HTTP_CODE}} and message $(cat portal)"; \
+        exit 1
+        
+    - name: Log error if not successful
+      if: ${{steps.generate-portal.outputs.HTTP_CODE != '200' && steps.generate-portal.outputs.CONTENT_TYPE == 'application/zip'}}
+      run: |
+        echo "The Portal Generation request failed with response code ${{steps.generate-portal.outputs.HTTP_CODE}}; \
+        exit
