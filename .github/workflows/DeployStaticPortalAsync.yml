@@ -21,7 +21,7 @@ jobs:
     - name: Call docs as code async endpoint
       id: upload
       run: |
-        RESPONSE=`curl --silent --write-out '%{http_code}\t%{content_type}' --output response1.json --location 'https://api.apimatic.io/portal/v2' \
+        RESPONSE=`curl --silent --write-out '%{http_code}\t%{content_type}' --output response1.json --location 'https://api.apimatic.io/portal' \
             --header 'Authorization:X-Auth-Key ${{ secrets.API_KEY }}' --form 'file=@build-input.zip'`
 
         HTTP_CODE=$(echo $RESPONSE | cut -d " " -f 1);
